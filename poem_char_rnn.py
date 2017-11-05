@@ -1,6 +1,6 @@
 # coding=utf-8
 ''' poemCharRNN 模型
- -keras 简单，但不灵活。
+ -keras 简单，不灵活。
  -tensorlayer，既简单，又灵活。[使用]
 '''
 
@@ -10,7 +10,7 @@ import os
 import logging
 import pickle
 import numpy as np
-
+import glob
 import tensorflow  as tf 
 import tensorlayer as tl
 
@@ -19,16 +19,68 @@ BOS = '<s>'
 EOS = '</s>'
 UNK = '<unk>'
 
+#列出目录内文件,不做递归
+def dirfileWithRecur( path , files ):
+    if os.path.isfile(path):
+        files.append(path)
+        return files
+
+    for fn in glob.glob( path + os.sep + '*' ): # '*'代表匹配所有文件
+        if os.path.isdir( fn ):
+            dirfileWithRecur( fn, files)   #遍历目录内文件
+            continue   
+        else:
+            files.append(fn)
+    return files
+
 class PoemCharRNN:
-    def load_data(self, fname, store_file="./data/dataset.pkl"):
+    def load_language(self,dir, store_file="./data/pythondataset.pkl"):
+        '''加载源代码文件，'''
+        if  os.path.isfile(store_file):
+            with open(store_file, 'rb') as f:
+                logging.info('load dataset  from {}'.format(store_file))
+                self.word_to_id, self.id_to_word, data = pickle.load(f)
+                return data
+
+        files=[]
+        dirfileWithRecur(dir,files)
+
+        data=[]
+        dic = set()
+        dic.add(BOS)
+        dic.add(EOS)
+        dic.add(UNK)
+        for fname in files:
+            if not  fname.endswith('.py'):
+                continue
+            with open(fname,encoding='utf-8') as f:
+                doc = f.read()
+            data.append(BOS)
+            data.extend(list(doc))
+            data.append(EOS)
+            dic=dic.union(set(list(doc)))
+        dic = list(dic)
+        self.word_to_id = {dic[i]: i for i in range(len(dic))}
+        self.id_to_word = {i: dic[i] for i in range(len(dic))}
+   
+        data =[ self.word_to_id[w] for w in data ]
+        with open(store_file, 'wb') as f:
+            pickle.dump((self.word_to_id, self.id_to_word, data), f)
+
+        logging.debug('doc number is {} '.format(data.count(self.word_to_id[EOS])))
+        logging.debug('dict size is {} '.format(len(self.word_to_id)))
+        return data
+
+
+    def load_data(self, fname, store_file="./data/dataset.pkl",poem_length=None):
         '''
-            加载数据，只选用四言绝句和四言律诗
+            加载数据
             数据格式：
                 903_21	同前（崔十娘）	张鷟	映水俱知笑，成蹊竟不言。即今无自在，高下任渠攀 
                 901_17	送别（含思落句势）	王昌龄	春江愁送君，蕙草生氤氲。醉后不能语，乡山雨雰雰。
 
         '''
-        if os.path.isfile(store_file):
+        if  False : #os.path.isfile(store_file):
             with open(store_file, 'rb') as f:
                 logging.info('load dataset  from {}'.format(store_file))
                 self.word_to_id, self.id_to_word, data = pickle.load(f)
@@ -45,8 +97,11 @@ class PoemCharRNN:
                 if len(segs) < 4:
                     logging.warn('read line error :{}'.format(line))
                     continue
-                text = list(segs[3])
+                text = [BOS]
+                text.extend(list(segs[3]))
                 text.append(EOS)
+                if poem_length != None and len(text)!= poem_length+2:
+                    continue 
                 data.extend(text)
         dic.extend(list(set(data)))
         
@@ -57,6 +112,8 @@ class PoemCharRNN:
         with open(store_file, 'wb') as f:
             pickle.dump((self.word_to_id, self.id_to_word, data), f)
 
+        logging.debug('poem number is {} '.format(data.count(self.word_to_id[EOS])))
+        logging.debug('dict size is {} '.format(len(self.word_to_id)))
         return data
 
 
@@ -69,7 +126,7 @@ class PoemCharRNN:
         return vocabs[sample]
 
 
-    def train_and_infer(self, data, epoch=1000, model_file='model.npz'):
+    def train_and_infer(self, data, epoch=20, model_file='model.npz',infer_length=64):
         '''训练模型'''
 
         sess =tf.InteractiveSession()
@@ -171,33 +228,37 @@ class PoemCharRNN:
             #任意作诗一首
             encode_state = tl.layers.initialize_rnn_state(encode_lstm_infer.initial_state)
             decode_state = tl.layers.initialize_rnn_state(decode_lstm_infer.initial_state)
-            poem = []
-            tx =  np.array([[self.word_to_id[EOS]]])
-            feed_dict = {input_data_infer:tx,
+            poem = [BOS]
+            for w in poem:
+                tx =  np.array([[self.word_to_id[w]]])
+                feed_dict = {input_data_infer:tx,
                             encode_lstm_infer.initial_state :encode_state,
                             decode_lstm_infer.initial_state : decode_state}
-            out,encode_state,decode_state = sess.run([infer_out,encode_lstm_infer.final_state,decode_lstm_infer.final_state],feed_dict=feed_dict)
+                out,encode_state,decode_state = sess.run([infer_out,encode_lstm_infer.final_state,decode_lstm_infer.final_state],feed_dict=feed_dict)
 
             word = self.to_word(out,self.id_to_word )
-            while word != EOS :
+            while word != EOS  and len(poem) < infer_length :
                 poem.append(word)
                 feed_dict = {input_data_infer:[[self.word_to_id[word]]],
                              encode_lstm_infer.initial_state :encode_state,
                             decode_lstm_infer.initial_state : decode_state}
                 out,encode_state,decode_state = sess.run([infer_out,encode_lstm_infer.final_state,decode_lstm_infer.final_state],feed_dict=feed_dict)
-                word = self.to_word(out,self.id_to_word )
-            logging.info('new poem : {}'.format(''.join(poem)))
+                word = self.to_word(out,self.id_to_word ) #概率选择保证了每次做的诗时不一样的
+            logging.info('new text : \n#################\n{}\n#################\n'.format(''.join(poem[1:])))
            
 
 if __name__ == '__main__':
     pcrnn = PoemCharRNN()
-    data = pcrnn.load_data('./data/ts.txt')
-    logging.debug('poem number is {} '.format(data.count(pcrnn.word_to_id[EOS])))
-    logging.debug('dict size is {} '.format(len(pcrnn.word_to_id)))
-    rand_pos = np.random.randint(len(data))
-    logging.debug('one segment :{} '.format(''.join([pcrnn.id_to_word[idx] for idx in data[rand_pos:rand_pos+20]])))
 
+    #只用四言绝句训练
+    #data = pcrnn.load_data('./data/ts.txt',poem_length=24)
+    #pcrnn.train_and_infer(data,epoch=1000,model_file='model-s4-e1000.npz')
 
-    pcrnn.train_and_infer(data)
+    data =pcrnn.load_language("D:\\learning\\data\\synitalent\\代码数据集\\gitprojects\\Python@boto")
+    pcrnn.train_and_infer(data,epoch=1000,model_file='model-python-e1000.npz',infer_length=1024)
+
+    #data = pcrnn.load_data('./data/ts.txt')
+    #pcrnn.train_and_infer(data)
     
+  
     
